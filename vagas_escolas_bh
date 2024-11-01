@@ -1,0 +1,150 @@
+import requests
+import pandas as pd
+from bs4 import BeautifulSoup
+import re
+import time
+import os
+
+
+# Função para extrair dados das escolas da prefeitura de BH
+def extrair_dados_escolas(url, headers):
+    response = requests.get(url, headers=headers)
+    response.raise_for_status()
+    soup = BeautifulSoup(response.text, 'html.parser')
+
+    schools = []
+    for dl in soup.find_all('dl', class_='ckeditor-accordion'):
+        school = {}
+        dt = dl.find('dt')
+        if dt:
+            school['Nome'] = dt.get_text(strip=True)
+        for dd in dl.find_all('dd'):
+            for p in dd.find_all('p'):
+                strong = p.find('strong')
+                if strong:
+                    key = strong.get_text(strip=True).replace(':', '')
+                    value = p.get_text(strip=True).replace(f'{key}: ', '')
+                    school[key] = value
+        schools.append(school)
+
+    df = pd.DataFrame(schools)
+
+    # Filtrar apenas as colunas desejadas
+    colunas_desejadas = ['Nome', 'Sigla', 'Regional', 'Jurisdição - 2024', 'Jurisdição - 2025', 'Código INEP', 'Direção', 'Telefone(s)', 'E-mail', 'Endereço']
+    df = df[colunas_desejadas]
+
+    # Extrair CEP e Número do endereço
+    df['CEP'] = df['Endereço'].str.extract(r'CEP: (\d{5}-\d{3})', expand=False)
+    df['Número'] = df['Endereço'].str.extract(r', (\d+)', expand=False)
+
+    return df
+
+# Função para buscar dados de vagas com base em CEP, número e tipo de ensino
+def buscar_dados_vagas(cep, numero, ensino):
+    url = f"https://educare.pro.br/vagasrp/api/pesquisa_vagas2.json?&cep={cep}&numero={numero}&ensino={ensino}"
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        data = response.json()
+
+        if data["status"] == "sucesso":
+            soup = BeautifulSoup(data["resultado"], "html.parser")
+            escolas = []
+            blocos = soup.find_all("h5")
+
+            # Iterar pelos blocos em pares
+            for i in range(0, len(blocos), 2):
+                nome_escola = blocos[i].text.strip()
+                descricao_vagas = blocos[i + 1].text.strip().split(":")[0]
+                vagas = blocos[i + 1].find("span", {"class": "badge"}).text.strip()
+
+                escolas.append({"Escola": nome_escola, "Ensino": case(ensino), "Vagas": vagas})
+            return escolas
+    except requests.RequestException as e:
+        print("Erro ao fazer a requisição:", e)
+    except Exception as e:
+        print("Erro ao processar dados:", e)
+    return []
+
+# Função para acumular todas as vagas em um DataFrame final
+def acumular_dados_vagas(df, start_index=0):
+    vagas_acumuladas = []
+    
+    # Carregar dados acumulados previamente se existirem
+    if os.path.exists("vagas_acumuladas.csv"):
+        vagas_acumuladas = pd.read_csv("vagas_acumuladas.csv").to_dict(orient="records")
+
+    for i in range(start_index, len(df)):
+        try:
+            print(f"Processando escola {i}: {df.iloc[i]['Nome']}")
+            cep = df.iloc[i]['CEP']
+            numero = df.iloc[i]['Número']
+
+            # Verificar se CEP e Número são válidos
+            if pd.isna(cep) or pd.isna(numero):
+                print("CEP ou Número ausente, pulando esta escola.")
+                continue
+
+            cep = cep.replace('-', '')
+
+            # Iterar sobre os tipos de ensino
+            for ensino in range(1, 16):
+                print(f"Buscando dados para ensino {ensino}")
+                vagas = buscar_dados_vagas(cep, numero, ensino)
+                vagas_acumuladas.extend(vagas)
+                time.sleep(0.3)  # Intervalo entre as requisições
+
+            # Salvar progresso incremental a cada escola
+            pd.DataFrame(vagas_acumuladas).to_csv("vagas_acumuladas.csv", index=False)
+        
+        except Exception as e:
+            print(f"Erro ao processar escola {i}: {e}")
+            continue
+
+    # Converter para DataFrame final com todas as vagas
+    df_vagas = pd.DataFrame(vagas_acumuladas)
+    return df_vagas
+
+# Função para retornar a descrição com base no número
+def case(ensino):
+    return opcoes_ensino.get(ensino, "Opção inválida")
+
+
+# Dicionário de mapeamento
+opcoes_ensino = {
+    1: "Ed. Inf. - 0 / 1 ANOS",
+    2: "Ed. Inf. - 1 / 2 ANOS",
+    3: "Ed. Inf. - 2 / 3 ANOS",
+    4: "Ed. Inf. - 3 / 4 ANOS",
+    5: "Ed. Inf. - 4 / 5 ANOS",
+    6: "Ed. Inf. - 5 / 6 ANOS",
+    7: "1º ANO",
+    8: "2º ANO",
+    9: "3º ANO",
+    10: "4º ANO",
+    11: "5º ANO",
+    12: "6º ANO",
+    13: "7º ANO",
+    14: "8º ANO",
+    15: "9º ANO"
+}
+  
+    
+    
+# Executar o processo
+url = 'https://prefeitura.pbh.gov.br/educacao/escolas-municipais-da-rede-propria'
+headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Cache-Control": "max-age=0",
+    "Upgrade-Insecure-Requests": "1",
+}
+
+# Extrair dados das escolas e acumular as vagas
+df_escolas = extrair_dados_escolas(url, headers)
+df_vagas = acumular_dados_vagas(df_escolas)
+
+# Exibir o DataFrame final
+print(df_vagas)
